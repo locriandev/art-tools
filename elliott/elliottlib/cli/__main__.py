@@ -59,10 +59,12 @@ from elliottlib.cli.repair_bugs_cli import repair_bugs_cli
 from elliottlib.cli.find_unconsumed_rpms import find_unconsumed_rpms_cli
 from elliottlib.cli.find_bugs_kernel_cli import find_bugs_kernel_cli
 from elliottlib.cli.find_bugs_kernel_clones_cli import find_bugs_kernel_clones_cli
+from elliottlib.cli.find_bugs_cve_cli import find_bugs_cve_cli
 from elliottlib.cli.move_builds_cli import move_builds_cli
 from elliottlib.cli.find_bugs_golang_cli import find_bugs_golang_cli
 from elliottlib.cli.remove_builds_cli import remove_builds_cli
 from elliottlib.cli.get_golang_report_cli import get_golang_report_cli
+
 
 # 3rd party
 import click
@@ -426,6 +428,7 @@ cli.add_command(find_bugs_kernel_cli)
 cli.add_command(find_bugs_kernel_clones_cli)
 cli.add_command(move_builds_cli)
 cli.add_command(find_bugs_golang_cli)
+cli.add_command(find_bugs_cve_cli)
 cli.add_command(remove_builds_cli)
 cli.add_command(get_golang_report_cli)
 
