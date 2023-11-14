@@ -18,7 +18,7 @@ from pyartcd import exectools, constants, redis
 from pyartcd.telemetry import start_as_current_span_async
 from pyartcd.util import branch_arches
 from pyartcd.jenkins import get_build_url
-from doozerlib.util import go_suffix_for_arch
+from doozerlib.util import go_suffix_for_arch, brew_suffix_for_arch
 from ghapi.all import GhApi
 
 
@@ -44,13 +44,14 @@ class BuildSyncPipeline:
         self.version = version
         self.group = f'openshift-{version}'
         self.assembly = assembly
+        self.arches = []
         self.publish = publish
         self.data_path = data_path
         self.emergency_ignore_issues = emergency_ignore_issues
         self.retrigger_current_nightly = retrigger_current_nightly
         self.doozer_data_gitref = doozer_data_gitref
-        self.images = images
-        self.exclude_arches = [] if not exclude_arches else exclude_arches.replace(',', ' ').split()
+        self.images = [] if not images else images.replace(' ', '').split(',')
+        self.exclude_arches = [] if not exclude_arches else exclude_arches.replace(' ', '').split(',')
         self.skip_multiarch_payload = skip_multiarch_payload
         self.logger = runtime.logger
         self.working_dir = self.runtime.working_dir
@@ -113,14 +114,33 @@ class BuildSyncPipeline:
         except Exception as e:
             self.logger.warning(f"Failed commenting to PR: {e}")
 
-    async def run(self):
-        if self.assembly not in ('stream', 'test'):
-            # Comment on PR if triggered from gen assembly
-            text_body = f"Build sync job [run]({self.job_run}) has been triggered"
-            await self.comment_on_assembly_pr(text_body)
+    async def _initialize(self):
+        # Check target arches
+        self.arches = await branch_arches(
+            group=f'openshift-{self.version}',
+            assembly=self.assembly
+        )
+
+        if self.exclude_arches:
+            for arch in self.exclude_arches:
+                try:
+                    self.arches.remove(arch)
+                except ValueError:
+                    self.logger.error('Trying to exclude arch not present in known arches %s',
+                                      arch, self.arches)
+                    raise
+        self.logger.info('Syncing arches: %s', self.arches)
 
         # Make sure we're logged into the OC registry
         await registry_login(self.runtime)
+
+        # Comment on PR if triggered from gen-assembly, only for names assemblies
+        if self.assembly not in ('stream', 'test'):
+            text_body = f"Build sync job [run]({self.job_run}) has been triggered"
+            await self.comment_on_assembly_pr(text_body)
+
+    async def run(self):
+        await self._initialize()
 
         # Should we retrigger current nightly?
         if self.retrigger_current_nightly:
@@ -216,8 +236,11 @@ class BuildSyncPipeline:
 
             self.logger.info('Backup completed for namespace %s', ns)
 
-        namespaces = ['ocp', 'ocp-priv', 'ocp-s390x', 'ocp-s390x-priv', 'ocp-ppc64le',
-                      'ocp-ppc64le-priv', 'ocp-arm64', 'ocp-arm64-priv']
+        namespaces = []
+        for arch in self.arches:
+            namespaces.append(f'ocp{brew_suffix_for_arch(arch)}')
+            namespaces.append(f'ocp{brew_suffix_for_arch(arch)}-priv')
+        self.logger.info('Backing up namespaces: %s', ', '.join(namespaces))
 
         tasks = []
         for namespace in namespaces:
@@ -278,14 +301,10 @@ class BuildSyncPipeline:
             return
 
         try:
-            supported_arches = await branch_arches(
-                group=f'openshift-{self.version}',
-                assembly=self.assembly
-            )
             tags_to_transfer: list = rhcos.get_container_names(self.group_runtime)
 
             tasks = []
-            for arch in supported_arches:
+            for arch in self.arches:
                 arch_suffix = go_suffix_for_arch(arch)
                 for tag in tags_to_transfer:
                     tasks.append(self._tag_into_ci_imagestream(arch_suffix, tag))
@@ -309,7 +328,7 @@ class BuildSyncPipeline:
             'doozer',
             f'--assembly={self.assembly}']
         if self.images:
-            cmd.append(f'--images={self.images}')
+            cmd.append(f'--images={",".join(self.images)}')
         cmd.extend([
             f'--working-dir={mirror_working}',
             f'--data-path={self.data_path}'
@@ -325,10 +344,10 @@ class BuildSyncPipeline:
         ])
         if self.emergency_ignore_issues:
             cmd.append('--emergency-ignore-issues')
-        if not self.skip_multiarch_payload:
-            cmd.append('--apply-multi-arch')
         if self.exclude_arches:
-            cmd.extend([f'--exclude-arch {arch}' for arch in self.exclude_arches])
+            cmd.extend([f'--exclude-arch={arch}' for arch in self.exclude_arches])
+        elif not self.skip_multiarch_payload:  # not applicable in case arches are excluded
+            cmd.append('--apply-multi-arch')
         if self.runtime.dry_run:
             cmd.extend(['--skip-gc-tagging', '--moist-run'])
         await exectools.cmd_assert_async(cmd, env=os.environ.copy())
