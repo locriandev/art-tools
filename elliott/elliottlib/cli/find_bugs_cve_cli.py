@@ -1,11 +1,15 @@
+import json
 import sys
 import traceback
 from typing import Optional
 
 import click
 
+from artcommonlib import exectools
+from artcommonlib.constants import BREW_POOL_SIZE
+from artcommonlib.util import isolate_major_minor_in_group
 from elliottlib import Runtime
-from elliottlib.bzutil import BugTracker
+from elliottlib.brew import BuildStates
 from elliottlib.cli.common import cli
 from elliottlib.cli.find_bugs_sweep_cli import FindBugsMode
 from elliottlib.metadata import Metadata
@@ -14,48 +18,37 @@ from elliottlib.metadata import Metadata
 class FindBugsCVEs(FindBugsMode):
     def __init__(self, runtime: Runtime):
         super().__init__(
-            status={'ON_QA', 'VERIFIED', 'RELEASE_PENDING'},
+            status=['ON_QA', 'VERIFIED', 'RELEASE_PENDING'],
             cve_only=True,
         )
 
         self.runtime = runtime
         self.logger = self.runtime.logger
+        self.issues = {}
 
     def run(self):
         exit_code = 0
 
-        for b in [self.runtime.get_bug_tracker('jira'), self.runtime.get_bug_tracker('bugzilla')]:
+        for tracker in [self.runtime.get_bug_tracker('jira'), self.runtime.get_bug_tracker('bugzilla')]:
             try:
-                self._find_bugs_cve(b)
+                # Find bugs
+                statuses = sorted(self.status)
+                tr = tracker.target_release()
+                self.logger.info(f"Searching {tracker.type} for bugs with status {statuses} and target releases: {tr}")
+                bugs = self.search(bug_tracker_obj=tracker, verbose=self.runtime.debug)
+                self.logger.info(f"Found {len(bugs)} bugs: {', '.join(sorted(str(b.id) for b in bugs)) or []}")
+
+                # Find builds
+                with self.runtime.pooled_koji_client_session(caching=True) as koji_api:
+                    exectools.parallel_exec(lambda bug, _: self._find_latest_build(bug, koji_api), bugs,
+                                            n_threads=BREW_POOL_SIZE)
+
             except Exception as e:
                 self.logger.error(traceback.format_exc())
-                self.logger.error(f'exception with {b.type} bug tracker: {e}')
-                exit_code = 1
-        sys.exit(exit_code)
+                self.logger.error(f'exception with {tracker.type} bug tracker: {e}')
+                raise
 
-    def _find_bugs_cve(self, bug_tracker: BugTracker):
-        statuses = sorted(self.status)
-        tr = bug_tracker.target_release()
-        self.logger.info(f"Searching {bug_tracker.type} for bugs with status {statuses} and target releases: {tr}")
-
-        bugs = self.search(bug_tracker_obj=bug_tracker, verbose=self.runtime.debug)
-        # TODO remove
-        bugs = [bug for bug in bugs if bug.id == 'OCPBUGS-31140']
-        self.logger.info(f"Found {len(bugs)} bugs: {', '.join(sorted(str(b.id) for b in bugs)) or []}")
-
-        for bug in bugs:
-            try:
-                pscomponent = [keyword.split(':')[-1] for keyword in bug.keywords if 'pscomponent' in keyword][0]
-                self.logger.info(f'{bug.id} - {pscomponent}')
-                latest_build = self._find_latest_build(pscomponent)
-
-                if latest_build:
-                    self.logger.info(f'Found build for {pscomponent}: {latest_build["nvr"]}')
-                else:
-                    self.logger.warning(f'No build found build for {pscomponent}')
-
-            except IndexError:
-                self.logger.warning('bug %s does not have a pscomponent set', bug.id)
+        self._report_issues()
 
     def _find_meta_from_pscomponent(self, pscomponent: str) -> Optional[Metadata]:
         """
@@ -69,21 +62,58 @@ class FindBugsCVEs(FindBugsMode):
 
         for meta in metas:
             if meta.get_component_name() == pscomponent:
-                self.logger.info('Found %s associated with pscomponent %s', meta.name, pscomponent)
                 return meta
 
-        self.logger.warning('Could not associate %s with any image/rpm', pscomponent)
         return None
 
-    def _find_latest_build(self, pscomponent: str):
-        meta = self._find_meta_from_pscomponent(pscomponent)
-        if not meta:
-            return  # TODO
+    def _add_issue(self, bug, issue):
+        if bug.id not in self.issues.keys():
+            self.issues[bug.id] = []
+        self.issues[bug.id].append(issue)
 
-        return meta.get_latest_build(
-            component_name=pscomponent,
-            el_target=meta.branch_el_target()
-        )
+    def _report_issues(self):
+        click.echo('==============================')
+
+        if self.issues:
+            click.echo('Found issues')
+            click.echo(json.dumps(self.issues, indent=4))
+
+        else:
+            click.echo('No issues found')
+
+        click.echo('==============================')
+
+    def _find_latest_build(self, bug, koji_api):
+        try:
+            pscomponent = [keyword.split(':')[-1] for keyword in bug.keywords if 'pscomponent' in keyword][0]
+
+        except IndexError:
+            msg = f'bug {bug.id} does not have a pscomponent set'
+            self.logger.warning(msg, bug.id)
+            self._add_issue(bug, msg)
+            return
+
+        meta = self._find_meta_from_pscomponent(pscomponent)
+        package_info = koji_api.getPackage(pscomponent)
+        major, minor = isolate_major_minor_in_group(self.runtime.group)
+        if meta:
+            pattern = f'{pscomponent}*{major}.{minor}*.assembly.stream*'
+        else:
+            pattern = f'{pscomponent}*{major}.{minor}*'
+
+        builds = koji_api.listBuilds(packageID=package_info['id'],
+                                     state=BuildStates.COMPLETE.value,
+                                     pattern=pattern,
+                                     queryOpts={'limit': 1, 'order': '-creation_event_id'})
+        if not builds:
+            msg = f'No build found for {pscomponent} using pattern {pattern}'
+            self.logger.warning(msg)
+            self._add_issue(bug.id, msg)
+            return
+
+        latest_build = builds[0]
+        self.logger.info(f'Found build for {pscomponent}: {latest_build["nvr"]}')
+        return latest_build
 
 
 @cli.command("find-bugs:cve", short_help="Find CVEs with missing information")
@@ -102,6 +132,3 @@ def find_bugs_cve_cli(runtime: Runtime):
     runtime.initialize(mode='both', disabled=True)
     find_bugs_obj = FindBugsCVEs(runtime)
     find_bugs_obj.run()
-
-
-

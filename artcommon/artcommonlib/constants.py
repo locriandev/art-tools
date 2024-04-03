@@ -4,3 +4,4 @@ RHCOS_RELEASES_BASE_URL = "https://releases-rhcos-art.apps.ocp-virt.prod.psi.red
 BREW_HUB = "https://brewhub.engineering.redhat.com/brewhub"
 BREW_DOWNLOAD_URL = "https://download.eng.bos.redhat.com/brewroot"
 RELEASE_SCHEDULES = "https://pp.engineering.redhat.com/api/v7/releases"
+BREW_POOL_SIZE = 10  # Maximum number of concurrent connections to Koji API

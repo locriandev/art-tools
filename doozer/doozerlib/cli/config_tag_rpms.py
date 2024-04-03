@@ -7,6 +7,7 @@ import koji
 
 from artcommonlib import exectools
 from artcommonlib.assembly import AssemblyTypes
+from artcommonlib.constants import BREW_POOL_SIZE
 from artcommonlib.release_util import split_el_suffix_in_release
 from doozerlib import brew
 from doozerlib.cli import cli, click_coroutine, pass_runtime
@@ -103,7 +104,6 @@ class TagRPMsCli:
         logger.info("Logging into Brew...")
         koji_api = self._runtime.build_retrying_koji_client()
         koji_api.gssapi_login()
-        MAX_BUILDS = 10  # getting 10 latest builds per package should be more than enough
         builds_to_tag: Dict[str, Dict[str]] = {}  # target_tag_name -> dict of NVRs {nvr_string: build_object}
         builds_to_untag: Dict[str, Set[str]] = {}  # target_tag_name -> set of NVRs
         for entry in rpm_deliveries:
@@ -122,12 +122,12 @@ class TagRPMsCli:
                 [(entry.stop_ship_tag, pkg) for pkg in entry.packages],
                 build_type="rpm")
             # Get at most 10 builds in integration tag
-            logger.info("Getting %s latest tagged builds in integration tag %s...", MAX_BUILDS, entry.integration_tag)
+            logger.info("Getting %s latest tagged builds in integration tag %s...", BREW_POOL_SIZE, entry.integration_tag)
             builds_in_integration_tag = await self.get_tagged_builds(
                 koji_api,
                 [(entry.integration_tag, pkg) for pkg in entry.packages],
                 build_type="rpm",
-                latest=MAX_BUILDS)
+                latest=BREW_POOL_SIZE)
             for package, candidate_builds, stop_ship_builds in zip(entry.packages, builds_in_integration_tag, builds_in_stop_ship_tag):
                 stop_ship_nvrs = {b["nvr"] for b in stop_ship_builds}
                 logger.info("Found %s build(s) of package %s in stop-ship tag %s", len(stop_ship_nvrs), package, entry.stop_ship_tag)
