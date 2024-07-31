@@ -760,6 +760,7 @@ class Ocp4Pipeline:
         # Otherwise we might rebase, then get blocked on the mass rebuild lock
         # As a consequence, we might be building outdated stuff
         await self._rebase_images()
+        return
         await self._build_images()
 
         if self.mass_rebuild:
@@ -993,6 +994,7 @@ class Ocp4Pipeline:
             self.runtime.logger.info('Not building images.')
 
         # Sync images
+        return
         await self._sync_images()
 
         # Mirror RPMs
