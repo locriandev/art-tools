@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import os
+import tempfile
 import typing
 from datetime import datetime, timezone, timedelta
 
@@ -33,6 +35,10 @@ class ConfigScanSources:
         if runtime.konflux_db is None:
             raise DoozerFatalError('Cannot run scan-sources without a valid Konflux DB connection')
         runtime.konflux_db.bind(KonfluxBuildRecord)
+
+        self.github_token = os.getenv('GITHUB_TOKEN')
+        if not self.github_token:
+            raise DoozerFatalError("GITHUB_TOKEN environment variable must be set")
 
         self.logger = logging.getLogger(__name__)
 
@@ -402,7 +408,7 @@ class ConfigScanSources:
             # like image meta, repos, and streams to see if they have changed
             # We detect config changes by comparing their digest changes.
             # The config digest of the previous build is stored at .oit/config_digest on distgit repo.
-            # self.check_config_changes(image_meta, build_record)
+            self.check_config_changes(image_meta, build_record)
 
         self.logger.debug('Will be assessing tagging changes between '
                           'newest_image_event_ts:%s and oldest_image_event_ts:%s',
@@ -474,16 +480,35 @@ class ConfigScanSources:
             n_threads=20
         )
 
-    def check_config_changes(self, image_meta: ImageMetadata, build_info):
-        try:
-            # git://pkgs.devel.redhat.com/containers/atomic-openshift-descheduler#6fc9c31e5d9437ac19e3c4b45231be8392cdacac
-            source_url = build_info['source']
-            source_commit = source_url.split('#')[1]  # isolate the commit hash
-            # Look at the digest that created THIS build. What is in head does not matter.
-            prev_digest = image_meta.fetch_cgit_file('.oit/config_digest',
-                                                     commit_hash=source_commit).decode('utf-8')
+    def fetch_config_digest(self, build_record: KonfluxBuildRecord):
+        """
+        Given a Konflux build record, fetches the configuration digest associated with the rebase commit
+        associated with the build.
+        """
 
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            config_digest = temp_file.name
+
+            # Download the config digest to the temporary file
+            artcommonlib.util.download_file_from_github(
+                repository=build_record.rebase_repo_url,
+                branch=build_record.rebase_commitish,
+                path='.oit/config_digest',
+                token=self.github_token,
+                destination=config_digest)
+
+            # Read and return the content of the temporary file
+            with open(config_digest) as f:
+                return f.read()
+
+    def check_config_changes(self, image_meta: ImageMetadata, build_record: KonfluxBuildRecord):
+        try:
+            # Look at the digest that created THIS build. What is in head does not matter.
+            prev_digest = self.fetch_config_digest(build_record)
+
+            # Compute the latest config digest
             current_digest = image_meta.calculate_config_digest(self.runtime.group_config, self.runtime.streams)
+
             if current_digest.strip() != prev_digest.strip():
                 self.logger.info('%s config_digest %s is differing from %s',
                                  image_meta.distgit_key, prev_digest, current_digest)
