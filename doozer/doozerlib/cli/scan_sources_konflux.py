@@ -61,7 +61,7 @@ class ConfigScanSources:
             'engine': Engine.KONFLUX,
         }
 
-        self.latest_build_records = []
+        self.latest_build_records_map = []
 
     async def run(self):
         # First, try to rebase into openshift-priv to reduce upstream merge -> downstream build time
@@ -70,10 +70,11 @@ class ConfigScanSources:
 
         # Store latest build records in a map. This will let us reuse this information,
         # reducing DB queries and execution time
-        self.latest_build_records = await self.runtime.konflux_db.get_latest_builds(
-            names=[meta.distgit_key for meta in self.all_metas],
-            **self.base_search_params
-        )
+        self.latest_build_records_map = dict(zip(
+            [meta.distgit_key for meta in self.all_metas],
+            await self.runtime.konflux_db.get_latest_builds(names=[meta.distgit_key for meta in self.all_metas],
+                                                            **self.base_search_params)
+        ))
 
         # Then, scan for any upstream source code changes. If found, these are guaranteed rebuilds.
         await self.scan_for_upstream_changes()
@@ -260,7 +261,7 @@ class ConfigScanSources:
             with Dir(path):
                 self._try_reconciliation(metadata, priv_repo_name, public_branch_name, priv_branch_name)
 
-    def handle_missing_upstream_commit_build(self, upstream_commit_hash):
+    def handle_missing_upstream_commit_build(self, name, upstream_commit_hash):
         """
         There is no build for this upstream commit. Two options to assess:
         1. This is a new commit and needs to be built
@@ -274,6 +275,7 @@ class ConfigScanSources:
         # Check whether a build attempt with this commit has failed before.
         failed_commit_build_record = self.runtime.konflux_db.get_latest_build(
             **self.base_search_params,
+            name=name,
             extra_patterns={'release': f'.g*{upstream_commit_hash[:7]}'},
             outcome=KonfluxBuildOutcome.FAILURE
         )
@@ -298,15 +300,8 @@ class ConfigScanSources:
                                   f'but holding off for at least {rebuild_interval} hours before next attempt')
 
     async def target_needs_rebuild(self, meta: Metadata, el_target=None) -> RebuildHint:
-
-        search_params = {
-            **self.base_search_params,
-            'name': meta.distgit_key,
-            'el_target': el_target
-        }
-
         # If the component has never been built, mark for rebuild
-        latest_build_record = self.runtime.konflux_db.get_latest_build(**search_params)
+        latest_build_record = self.latest_build_records_map[meta.distgit_key]
         if not latest_build_record:
             return RebuildHint(code=RebuildHintCode.NO_LATEST_BUILD,
                                reason=f'Component {meta.get_component_name()} has no latest build '
@@ -320,7 +315,6 @@ class ConfigScanSources:
         if meta.meta_type == 'image':
             self.find_oldest_newest(latest_build_record)
 
-        #
         # We have no more "alias" source anywhere in ocp-build-data, and there's no such a thing as a distgit-only
         # component in Konflux; hence, assume that git is the only possible source for a component
         # TODO runtime.stage seems to be never different from False, maybe it can be pruned?
@@ -335,13 +329,15 @@ class ConfigScanSources:
 
         # Scan for any build in this assembly which includes the git commit.
         upstream_commit_build_record = self.runtime.konflux_db.get_latest_build(
-            **search_params,
+            **self.base_search_params,
+            name=meta.distgit_key,
+            el_target=el_target,
             extra_patterns={'commitish': upstream_commit_hash}
         )
 
         # No build from latest upstream commit: handle accordingly
         if not upstream_commit_build_record:
-            return self.handle_missing_upstream_commit_build(upstream_commit_hash)
+            return self.handle_missing_upstream_commit_build(meta.distgit_key, upstream_commit_hash)
 
         # Does most recent build match the one from the latest upstream commit?
         # If it doesn't, mark for rebuild
@@ -391,10 +387,7 @@ class ConfigScanSources:
             if image_meta in self.changing_image_metas:
                 continue
 
-            build_record = self.runtime.konflux_db.get_latest_build(
-                **self.base_search_params,
-                name=image_meta.distgit_key
-            )
+            build_record = self.latest_build_records_map[image_meta.distgit_key]
 
             if build_record is None:
                 continue
@@ -407,18 +400,18 @@ class ConfigScanSources:
             # like image meta, repos, and streams to see if they have changed
             # We detect config changes by comparing their digest changes.
             # The config digest of the previous build is stored at .oit/config_digest on distgit repo.
-            self.check_config_changes(image_meta, build_record)
+            # self.check_config_changes(image_meta, build_record)
 
         self.logger.debug('Will be assessing tagging changes between '
                           'newest_image_event_ts:%s and oldest_image_event_ts:%s',
                           self.newest_image_event_ts, self.oldest_image_event_ts)
 
-    def find_oldest_newest(self, build: KonfluxBuildRecord):
+    def find_oldest_newest(self, build_record: KonfluxBuildRecord):
         """
         Find the oldest and newest start_time timestamps across all components latest builds
         """
 
-        create_event_ts = build.start_time
+        create_event_ts = build_record.start_time
 
         if self.oldest_image_event_ts is None or create_event_ts < self.oldest_image_event_ts:
             self.oldest_image_event_ts = create_event_ts
