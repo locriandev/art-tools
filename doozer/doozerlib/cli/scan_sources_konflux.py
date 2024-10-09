@@ -52,18 +52,34 @@ class ConfigScanSources:
         self.all_metas = self.all_rpm_metas.union(self.all_image_metas)
 
         self.oldest_image_event_ts = None
-        self.newest_image_event_ts = 0
+        self.newest_image_event_ts = None
+
+        # Common params for all queries
+        self.base_search_params = {
+            'group': self.runtime.group,
+            'assembly': self.runtime.assembly,  # to let test ocp4-scan in non-stream assemblies, e.g. 'test'
+            'engine': Engine.KONFLUX,
+        }
+
+        self.latest_build_records = []
 
     async def run(self):
         # First, try to rebase into openshift-priv to reduce upstream merge -> downstream build time
         if self.rebase_priv:
             self.rebase_into_priv()
 
+        # Store latest build records in a map. This will let us reuse this information,
+        # reducing DB queries and execution time
+        self.latest_build_records = await self.runtime.konflux_db.get_latest_builds(
+            names=[meta.distgit_key for meta in self.all_metas],
+            **self.base_search_params
+        )
+
         # Then, scan for any upstream source code changes. If found, these are guaranteed rebuilds.
         await self.scan_for_upstream_changes()
 
         # Check for other reasons why images should be rebuilt (e.g. config changes, dependencies)
-        # self.check_for_image_changes()
+        self.check_for_image_changes()
 
         # Checks if an image needs to be rebuilt based on the packages it is dependent on
         # await self.check_changing_rpms()
@@ -244,7 +260,7 @@ class ConfigScanSources:
             with Dir(path):
                 self._try_reconciliation(metadata, priv_repo_name, public_branch_name, priv_branch_name)
 
-    def handle_missing_upstream_commit_build(self, search_params, upstream_commit_hash):
+    def handle_missing_upstream_commit_build(self, upstream_commit_hash):
         """
         There is no build for this upstream commit. Two options to assess:
         1. This is a new commit and needs to be built
@@ -256,20 +272,20 @@ class ConfigScanSources:
         now = datetime.now(timezone.utc)
 
         # Check whether a build attempt with this commit has failed before.
-        failed_commit_build = self.runtime.konflux_db.get_latest_build(
-            **search_params,
+        failed_commit_build_record = self.runtime.konflux_db.get_latest_build(
+            **self.base_search_params,
             extra_patterns={'release': f'.g*{upstream_commit_hash[:7]}'},
             outcome=KonfluxBuildOutcome.FAILURE
         )
 
         # If not, this is a net-new upstream commit. Build it.
-        if not failed_commit_build:
+        if not failed_commit_build_record:
             return RebuildHint(code=RebuildHintCode.NEW_UPSTREAM_COMMIT,
                                reason='A new upstream commit exists and needs to be built')
 
         # Otherwise, there was a failed attempt at this upstream commit on record.
         # Make sure provide at least rebuild_interval hours between such attempts
-        last_attempt_time = dateutil.parser.parse(failed_commit_build.start_time).replace(tzinfo=timezone.utc)
+        last_attempt_time = dateutil.parser.parse(failed_commit_build_record.start_time).replace(tzinfo=timezone.utc)
 
         # Latest failed attempt is older than the threshold: rebuild
         if last_attempt_time + timedelta(hours=rebuild_interval) < now:
@@ -282,26 +298,29 @@ class ConfigScanSources:
                                   f'but holding off for at least {rebuild_interval} hours before next attempt')
 
     async def target_needs_rebuild(self, meta: Metadata, el_target=None) -> RebuildHint:
-        # Common params for all queries
+
         search_params = {
+            **self.base_search_params,
             'name': meta.distgit_key,
-            'group': self.runtime.group,
-            'assembly': self.runtime.assembly,  # to let test ocp4-scan in non-stream assemblies, e.g. 'test'
-            'engine': Engine.KONFLUX,
             'el_target': el_target
         }
 
         # If the component has never been built, mark for rebuild
-        latest_build = self.runtime.konflux_db.get_latest_build(**search_params)
-        if not latest_build:
+        latest_build_record = self.runtime.konflux_db.get_latest_build(**search_params)
+        if not latest_build_record:
             return RebuildHint(code=RebuildHintCode.NO_LATEST_BUILD,
                                reason=f'Component {meta.get_component_name()} has no latest build '
                                       f'for assembly {self.runtime.assembly} '
                                       f'and target {el_target}')
 
         self.logger.debug('scan-sources coordinate: latest_build_creation_datetime for %s: %s',
-                          meta.name, latest_build.start_time)
+                          meta.name, latest_build_record.start_time)
 
+        # To limit the size of the queries we are going to make, find the oldest and newest builds across all images
+        if meta.meta_type == 'image':
+            self.find_oldest_newest(latest_build_record)
+
+        #
         # We have no more "alias" source anywhere in ocp-build-data, and there's no such a thing as a distgit-only
         # component in Konflux; hence, assume that git is the only possible source for a component
         # TODO runtime.stage seems to be never different from False, maybe it can be pruned?
@@ -315,24 +334,24 @@ class ConfigScanSources:
                           meta.name, upstream_commit_hash)
 
         # Scan for any build in this assembly which includes the git commit.
-        upstream_commit_build = self.runtime.konflux_db.get_latest_build(
+        upstream_commit_build_record = self.runtime.konflux_db.get_latest_build(
             **search_params,
             extra_patterns={'commitish': upstream_commit_hash}
         )
 
         # No build from latest upstream commit: handle accordingly
-        if not upstream_commit_build:
-            return self.handle_missing_upstream_commit_build(search_params, upstream_commit_hash)
+        if not upstream_commit_build_record:
+            return self.handle_missing_upstream_commit_build(upstream_commit_hash)
 
         # Does most recent build match the one from the latest upstream commit?
         # If it doesn't, mark for rebuild
-        if latest_build.nvr != upstream_commit_build.nvr:
+        if latest_build_record.nvr != upstream_commit_build_record.nvr:
             return RebuildHint(code=RebuildHintCode.UPSTREAM_COMMIT_MISMATCH,
-                               reason=f'Latest build {latest_build["nvr"]} does not match upstream commit build {upstream_commit_build["nvr"]}; commit reverted?')
+                               reason=f'Latest build {latest_build_record["nvr"]} does not match upstream commit build {upstream_commit_build_record["nvr"]}; commit reverted?')
 
         # Otherwise, no need to rebuild
         return RebuildHint(code=RebuildHintCode.BUILD_IS_UP_TO_DATE,
-                           reason=f'Build already exists for current upstream commit {upstream_commit_hash}: {latest_build}')
+                           reason=f'Build already exists for current upstream commit {upstream_commit_hash}: {latest_build_record}')
 
     async def does_meta_need_rebuild(self, meta: Metadata) -> Tuple[Metadata, RebuildHint]:
         if meta.config.targets:
@@ -366,43 +385,49 @@ class ConfigScanSources:
             else:
                 raise IOError(f'Unsupported meta type: {meta.meta_type}')  # TODO not handling RPM builds at the moment
 
-    def check_for_image_changes(self, koji_api):
+    def check_for_image_changes(self):
         for image_meta in self.runtime.image_metas():
-            build_info = image_meta.get_latest_build(default=None)
-
-            if build_info is None:
-                continue
-
-            # To limit the size of the queries we are going to make, find the oldest and newest image
-            self.find_oldest_newest(koji_api, build_info)
-
             # If a rebuild is already requested, skip following checks
             if image_meta in self.changing_image_metas:
                 continue
 
+            build_record = self.runtime.konflux_db.get_latest_build(
+                **self.base_search_params,
+                name=image_meta.distgit_key
+            )
+
+            if build_record is None:
+                continue
+
             # Request a rebuild if A is a dependent (operator or child image) of B
             # but the latest build of A is older than B.
-            self.check_dependents(image_meta, build_info)
+            self.check_dependents(image_meta, build_record)
 
             # If no upstream change has been detected, check configurations
             # like image meta, repos, and streams to see if they have changed
             # We detect config changes by comparing their digest changes.
             # The config digest of the previous build is stored at .oit/config_digest on distgit repo.
-            self.check_config_changes(image_meta, build_info)
+            self.check_config_changes(image_meta, build_record)
 
         self.logger.debug('Will be assessing tagging changes between '
                           'newest_image_event_ts:%s and oldest_image_event_ts:%s',
                           self.newest_image_event_ts, self.oldest_image_event_ts)
 
-    def find_oldest_newest(self, koji_api, build_info):
-        create_event_ts = koji_api.getEvent(build_info['creation_event_id'])['ts']
+    def find_oldest_newest(self, build: KonfluxBuildRecord):
+        """
+        Find the oldest and newest start_time timestamps across all components latest builds
+        """
+
+        create_event_ts = build.start_time
+
         if self.oldest_image_event_ts is None or create_event_ts < self.oldest_image_event_ts:
             self.oldest_image_event_ts = create_event_ts
-        if create_event_ts > self.newest_image_event_ts:
+
+        if self.newest_image_event_ts is None or create_event_ts > self.newest_image_event_ts:
             self.newest_image_event_ts = create_event_ts
 
-    def check_dependents(self, image_meta: ImageMetadata, build_info):
-        rebase_time = util.isolate_timestamp_in_release(build_info["release"])
+    def check_dependents(self, image_meta: ImageMetadata, build_record: KonfluxBuildRecord):
+        rebase_time = util.isolate_timestamp_in_release(build_record.release)
         if not rebase_time:  # no timestamp string in NVR?
             return
 
@@ -418,17 +443,20 @@ class ConfigScanSources:
                 dependencies.add(builder.member)
 
         def _check_dep(dep_key):
-            dep = self.runtime.image_map.get(dep_key)
-            if not dep:
+            dependency = self.runtime.image_map.get(dep_key)
+            if not dependency:
                 self.logger.warning("Image %s has unknown dependency %s. Is it excluded?",
                                     image_meta.distgit_key, dep_key)
                 return
 
-            dep_info = dep.get_latest_build(default=None)
-            if not dep_info:
+            dependency_build_record = self.runtime.konflux_db.get_latest_build(
+                **self.base_search_params,
+                name=dep_key
+            )
+            if not dependency_build_record:
                 return
 
-            dep_rebase_time = util.isolate_timestamp_in_release(dep_info["release"])
+            dep_rebase_time = util.isolate_timestamp_in_release(dependency_build_record.release)
             if not dep_rebase_time:  # no timestamp string in NVR?
                 return
 
