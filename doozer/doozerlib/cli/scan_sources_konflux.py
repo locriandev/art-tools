@@ -389,8 +389,8 @@ class ConfigScanSources:
             if image_meta in self.changing_image_metas:
                 continue
 
+            # Get the latest build we selected at the beginning of the pipeline
             build_record = self.latest_build_records_map[image_meta.distgit_key]
-
             if build_record is None:
                 continue
 
@@ -422,6 +422,10 @@ class ConfigScanSources:
             self.newest_image_event_ts = create_event_ts
 
     def check_dependents(self, image_meta: ImageMetadata, build_record: KonfluxBuildRecord):
+        """
+        An image should be rebuilt if one of its dependencies has a more recent build
+        """
+
         rebase_time = util.isolate_timestamp_in_release(build_record.release)
         if not rebase_time:  # no timestamp string in NVR?
             return
@@ -438,18 +442,24 @@ class ConfigScanSources:
                 dependencies.add(builder.member)
 
         def _check_dep(dep_key):
-            dependency = self.runtime.image_map.get(dep_key)
+            # Is the image dependency included in doozer --images list?
+            dependency = self.runtime.image_map.get(dep_key, None)
             if not dependency:
                 self.logger.warning("Image %s has unknown dependency %s. Is it excluded?",
                                     image_meta.distgit_key, dep_key)
                 return
 
+            # Is the dependency ever been built?
             dependency_build_record = self.latest_build_records_map[dep_key]
             if not dependency_build_record:
+                self.logger.warning('Dependency %s of image %s has never been built',
+                                    dep_key, image_meta.distgit_key)
                 return
 
             dep_rebase_time = util.isolate_timestamp_in_release(dependency_build_record.release)
             if not dep_rebase_time:  # no timestamp string in NVR?
+                self.logger.warning('Could not determine dependency rebase time from release %s',
+                                    dependency_build_record.release)
                 return
 
             dep_rebase_time = datetime.strptime(dep_rebase_time, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
