@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import typing
 from datetime import datetime, timezone, timedelta
 
 import click
@@ -61,7 +62,7 @@ class ConfigScanSources:
             'engine': Engine.KONFLUX,
         }
 
-        self.latest_build_records_map = []
+        self.latest_build_records_map: typing.Dict[str, KonfluxBuildRecord] = {}
 
     async def run(self):
         # First, try to rebase into openshift-priv to reduce upstream merge -> downstream build time
@@ -70,11 +71,10 @@ class ConfigScanSources:
 
         # Store latest build records in a map. This will let us reuse this information,
         # reducing DB queries and execution time
-        self.latest_build_records_map = dict(zip(
-            [meta.distgit_key for meta in self.all_metas],
-            await self.runtime.konflux_db.get_latest_builds(names=[meta.distgit_key for meta in self.all_metas],
-                                                            **self.base_search_params)
-        ))
+        latest_builds = await self.runtime.konflux_db.get_latest_builds(
+            names=[meta.distgit_key for meta in self.all_image_metas],
+            **self.base_search_params)
+        self.latest_build_records_map = dict(zip([meta.distgit_key for meta in self.all_image_metas], latest_builds))
 
         # Then, scan for any upstream source code changes. If found, these are guaranteed rebuilds.
         await self.scan_for_upstream_changes()
@@ -261,7 +261,7 @@ class ConfigScanSources:
             with Dir(path):
                 self._try_reconciliation(metadata, priv_repo_name, public_branch_name, priv_branch_name)
 
-    def handle_missing_upstream_commit_build(self, name, upstream_commit_hash):
+    async def handle_missing_upstream_commit_build(self, name, upstream_commit_hash):
         """
         There is no build for this upstream commit. Two options to assess:
         1. This is a new commit and needs to be built
@@ -273,10 +273,10 @@ class ConfigScanSources:
         now = datetime.now(timezone.utc)
 
         # Check whether a build attempt with this commit has failed before.
-        failed_commit_build_record = self.runtime.konflux_db.get_latest_build(
+        failed_commit_build_record = await self.runtime.konflux_db.get_latest_build(
             **self.base_search_params,
             name=name,
-            extra_patterns={'release': f'.g*{upstream_commit_hash[:7]}'},
+            extra_patterns={'commitish': upstream_commit_hash},
             outcome=KonfluxBuildOutcome.FAILURE
         )
 
@@ -328,7 +328,7 @@ class ConfigScanSources:
                           meta.name, upstream_commit_hash)
 
         # Scan for any build in this assembly which includes the git commit.
-        upstream_commit_build_record = self.runtime.konflux_db.get_latest_build(
+        upstream_commit_build_record = await self.runtime.konflux_db.get_latest_build(
             **self.base_search_params,
             name=meta.distgit_key,
             el_target=el_target,
@@ -337,13 +337,14 @@ class ConfigScanSources:
 
         # No build from latest upstream commit: handle accordingly
         if not upstream_commit_build_record:
-            return self.handle_missing_upstream_commit_build(meta.distgit_key, upstream_commit_hash)
+            return await self.handle_missing_upstream_commit_build(meta.distgit_key, upstream_commit_hash)
 
         # Does most recent build match the one from the latest upstream commit?
         # If it doesn't, mark for rebuild
         if latest_build_record.nvr != upstream_commit_build_record.nvr:
             return RebuildHint(code=RebuildHintCode.UPSTREAM_COMMIT_MISMATCH,
-                               reason=f'Latest build {latest_build_record["nvr"]} does not match upstream commit build {upstream_commit_build_record["nvr"]}; commit reverted?')
+                               reason=f'Latest build {latest_build_record.nvr} does not match upstream commit build '
+                                      f'{upstream_commit_build_record.nvr}; commit reverted?')
 
         # Otherwise, no need to rebuild
         return RebuildHint(code=RebuildHintCode.BUILD_IS_UP_TO_DATE,
@@ -351,6 +352,7 @@ class ConfigScanSources:
 
     async def does_meta_need_rebuild(self, meta: Metadata) -> Tuple[Metadata, RebuildHint]:
         if meta.config.targets:
+            hint = RebuildHint(code=RebuildHintCode.BUILD_IS_UP_TO_DATE, reason='')
             # If this meta has multiple build targets, check currency of each
             for target in meta.config.targets:
                 hint = await self.target_needs_rebuild(meta=meta, el_target=target)
@@ -442,10 +444,7 @@ class ConfigScanSources:
                                     image_meta.distgit_key, dep_key)
                 return
 
-            dependency_build_record = self.runtime.konflux_db.get_latest_build(
-                **self.base_search_params,
-                name=dep_key
-            )
+            dependency_build_record = self.latest_build_records_map[dep_key]
             if not dependency_build_record:
                 return
 
