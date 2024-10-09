@@ -68,7 +68,7 @@ class ConfigScanSources:
             'engine': Engine.KONFLUX,
         }
 
-        self.latest_build_records_map: typing.Dict[str, KonfluxBuildRecord] = {}
+        self.latest_image_build_records_map: typing.Dict[str, KonfluxBuildRecord] = {}
 
     async def run(self):
         # First, try to rebase into openshift-priv to reduce upstream merge -> downstream build time
@@ -77,10 +77,14 @@ class ConfigScanSources:
 
         # Store latest build records in a map. This will let us reuse this information,
         # reducing DB queries and execution time
-        latest_builds = await self.runtime.konflux_db.get_latest_builds(
+        latest_image_builds = await self.runtime.konflux_db.get_latest_builds(
             names=[meta.distgit_key for meta in self.all_image_metas],
             **self.base_search_params)
-        self.latest_build_records_map = dict(zip([meta.distgit_key for meta in self.all_image_metas], latest_builds))
+        self.latest_image_build_records_map = dict(zip(
+            [meta.distgit_key for meta in self.all_image_metas], latest_image_builds))
+
+        # To limit the size of the queries we are going to make, find the oldest and newest builds across all images
+        self.find_oldest_newest()
 
         # Then, scan for any upstream source code changes. If found, these are guaranteed rebuilds.
         await self.scan_for_upstream_changes()
@@ -307,7 +311,7 @@ class ConfigScanSources:
 
     async def target_needs_rebuild(self, meta: Metadata, el_target=None) -> RebuildHint:
         # If the component has never been built, mark for rebuild
-        latest_build_record = self.latest_build_records_map[meta.distgit_key]
+        latest_build_record = self.latest_image_build_records_map[meta.distgit_key]
         if not latest_build_record:
             return RebuildHint(code=RebuildHintCode.NO_LATEST_BUILD,
                                reason=f'Component {meta.get_component_name()} has no latest build '
@@ -316,10 +320,6 @@ class ConfigScanSources:
 
         self.logger.debug('scan-sources coordinate: latest_build_creation_datetime for %s: %s',
                           meta.name, latest_build_record.start_time)
-
-        # To limit the size of the queries we are going to make, find the oldest and newest builds across all images
-        if meta.meta_type == 'image':
-            self.find_oldest_newest(latest_build_record)
 
         # We have no more "alias" source anywhere in ocp-build-data, and there's no such a thing as a distgit-only
         # component in Konflux; hence, assume that git is the only possible source for a component
@@ -396,7 +396,7 @@ class ConfigScanSources:
                 continue
 
             # Get the latest build we selected at the beginning of the pipeline
-            build_record = self.latest_build_records_map[image_meta.distgit_key]
+            build_record = self.latest_image_build_records_map[image_meta.distgit_key]
             if build_record is None:
                 continue
 
@@ -410,22 +410,27 @@ class ConfigScanSources:
             # The config digest of the previous build is stored at .oit/config_digest on distgit repo.
             self.check_config_changes(image_meta, build_record)
 
-        self.logger.debug('Will be assessing tagging changes between '
-                          'newest_image_event_ts:%s and oldest_image_event_ts:%s',
-                          self.newest_image_event_ts, self.oldest_image_event_ts)
-
-    def find_oldest_newest(self, build_record: KonfluxBuildRecord):
+    def find_oldest_newest(self):
         """
         Find the oldest and newest start_time timestamps across all components latest builds
         """
 
-        create_event_ts = build_record.start_time
+        for image_meta in self.all_image_metas:
+            build_record = self.latest_image_build_records_map.get(image_meta.distgit_key)
+            if not build_record:
+                continue
 
-        if self.oldest_image_event_ts is None or create_event_ts < self.oldest_image_event_ts:
-            self.oldest_image_event_ts = create_event_ts
+            create_event_ts = build_record.start_time
 
-        if self.newest_image_event_ts is None or create_event_ts > self.newest_image_event_ts:
-            self.newest_image_event_ts = create_event_ts
+            if self.oldest_image_event_ts is None or create_event_ts < self.oldest_image_event_ts:
+                self.oldest_image_event_ts = create_event_ts
+
+            if self.newest_image_event_ts is None or create_event_ts > self.newest_image_event_ts:
+                self.newest_image_event_ts = create_event_ts
+
+        self.logger.info('Will be assessing tagging changes between '
+                         'newest_image_event_ts:%s and oldest_image_event_ts:%s',
+                         self.newest_image_event_ts, self.oldest_image_event_ts)
 
     def check_dependents(self, image_meta: ImageMetadata, build_record: KonfluxBuildRecord):
         """
@@ -456,7 +461,7 @@ class ConfigScanSources:
                 return
 
             # Is the dependency ever been built?
-            dependency_build_record = self.latest_build_records_map[dep_key]
+            dependency_build_record = self.latest_image_build_records_map[dep_key]
             if not dependency_build_record:
                 self.logger.warning('Dependency %s of image %s has never been built',
                                     dep_key, image_meta.distgit_key)
