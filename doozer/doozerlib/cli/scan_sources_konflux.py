@@ -65,10 +65,34 @@ class ConfigScanSources:
         self.base_search_params = {
             'group': self.runtime.group,
             'assembly': self.runtime.assembly,  # to let test ocp4-scan in non-stream assemblies, e.g. 'test'
-            'engine': Engine.KONFLUX,
         }
 
         self.latest_image_build_records_map: typing.Dict[str, KonfluxBuildRecord] = {}
+        self.latest_rpms_build_records_map: typing.Dict[str, KonfluxBuildRecord] = {}
+
+    async def find_latest_builds(self):
+        async def _find_latest_image_builds():
+            self.logger.info('Gathering latest image build records information...')
+            # For image builds, use engine = Konflux
+            latest_image_builds = await self.runtime.konflux_db.get_latest_builds(
+                names=[meta.distgit_key for meta in self.all_image_metas],
+                engine=Engine.KONFLUX,
+                **self.base_search_params)
+            self.latest_image_build_records_map = dict(zip(
+                [meta.distgit_key for meta in self.all_image_metas], latest_image_builds))
+
+        async def _find_latest_rpms_builds():
+            # TODO must account for RPM target
+            self.logger.info('Gathering latest RPMs build records information...')
+            # For RPM builds, use engine = Brew as we're not yet building RPMs in Konflux
+            latest_rpms_builds = await self.runtime.konflux_db.get_latest_builds(
+                names=[meta.distgit_key for meta in self.all_rpm_metas],
+                engine=Engine.BREW,
+                **self.base_search_params)
+            self.latest_rpms_build_records_map = dict(zip(
+                [meta.distgit_key for meta in self.all_rpm_metas], latest_rpms_builds))
+
+        await asyncio.gather(*[_find_latest_image_builds(), _find_latest_rpms_builds()])
 
     async def run(self):
         # First, try to rebase into openshift-priv to reduce upstream merge -> downstream build time
@@ -77,11 +101,7 @@ class ConfigScanSources:
 
         # Store latest build records in a map. This will let us reuse this information,
         # reducing DB queries and execution time
-        latest_image_builds = await self.runtime.konflux_db.get_latest_builds(
-            names=[meta.distgit_key for meta in self.all_image_metas],
-            **self.base_search_params)
-        self.latest_image_build_records_map = dict(zip(
-            [meta.distgit_key for meta in self.all_image_metas], latest_image_builds))
+        await self.find_latest_builds()
 
         # To limit the size of the queries we are going to make, find the oldest and newest builds across all images
         self.find_oldest_newest()
@@ -93,7 +113,7 @@ class ConfigScanSources:
         self.check_for_image_changes()
 
         # Checks if an image needs to be rebuilt based on the packages it is dependent on
-        # await self.check_changing_rpms()
+        await self.check_changing_rpms()
 
         # does_image_need_change() checks whether its non-member builder images have changed
         # but cannot determine whether member builder images have changed until anticipated
