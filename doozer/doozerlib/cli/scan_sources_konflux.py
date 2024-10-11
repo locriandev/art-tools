@@ -14,7 +14,7 @@ from typing import List, Tuple, Optional, cast
 import artcommonlib.util
 from artcommonlib import exectools
 from artcommonlib.konflux.konflux_build_record import KonfluxBuildRecord, Engine, KonfluxBuildOutcome
-from artcommonlib.model import Missing
+from artcommonlib.model import Missing, Model
 from artcommonlib.pushd import Dir
 from artcommonlib.rhcos import get_primary_container_name
 from doozerlib import brew, rhcos, util
@@ -107,10 +107,10 @@ class ConfigScanSources:
         self.find_oldest_newest()
 
         # Then, scan for any upstream source code changes. If found, these are guaranteed rebuilds.
-        await self.scan_for_upstream_changes()
+        # await self.scan_for_upstream_changes()
 
         # Check for other reasons why images should be rebuilt (e.g. config changes, dependencies)
-        self.check_for_image_changes()
+        await self.check_for_image_changes()
 
         # Checks if an image needs to be rebuilt based on the packages it is dependent on
         await self.check_changing_rpms()
@@ -409,7 +409,55 @@ class ConfigScanSources:
             else:
                 raise IOError(f'Unsupported meta type: {meta.meta_type}')  # TODO not handling RPM builds at the moment
 
-    def check_for_image_changes(self):
+    async def check_builders(self, image_meta: ImageMetadata, build_record: KonfluxBuildRecord):
+        builders = list(image_meta.config['from'].builder) or []
+        builders.append(image_meta.config['from'])  # Add the parent image to the builders
+
+        for builder in builders:
+            if builder.member:
+                parent_build_record = self.latest_image_build_records_map.get(builder.member)
+                if not parent_build_record:
+                    parent_build_record = await self.runtime.konflux_db.get_latest_build(
+                        **self.base_search_params,
+                        name=builder.member,
+                    )
+
+                if parent_build_record.end_time > build_record.end_time:
+                    self.add_image_meta_change(
+                        image_meta,
+                        RebuildHint(RebuildHintCode.BUILDER_CHANGING,
+                                    f'A builder or parent image {builder} has changed since {build_record.nvr} was built'))
+
+            elif builder.stream:
+                # TODO this will be using Brew API until we start running golang builds in Konflux on a regular basis
+                builder_image_name = self.runtime.resolve_stream(builder.stream).image
+                builder_image_url = self.runtime.resolve_brew_image_url(builder_image_name)
+                latest_builder_image_info = Model(util.oc_image_info__caching(builder_image_url))
+                builder_info_labels = latest_builder_image_info.config.config.Labels
+                builder_nvr_list = [builder_info_labels['com.redhat.component'], builder_info_labels['version'],
+                                    builder_info_labels['release']]
+                if not all(builder_nvr_list):
+                    raise IOError(f'Unable to find nvr in {builder_info_labels}')
+                builder_image_nvr = '-'.join(builder_nvr_list)
+                with self.runtime.pooled_koji_client_session() as koji_api:
+                    builder_brew_build = koji_api.getBuild(builder_image_nvr)
+                    builder_start_time = dateutil.parser.parse(builder_brew_build['creation_time']).replace(tzinfo=timezone.utc)
+                    if builder_start_time > build_record.start_time:
+                        self.add_image_meta_change(
+                            image_meta,
+                            RebuildHint(RebuildHintCode.BUILDER_CHANGING,
+                                        f'A builder or parent image {builder_image_name} has changed since {build_record.nvr} was built'))
+
+
+            else:
+                # TODO
+                raise IOError(f'Unable to determine builder or parent image pullspec from {builder}')
+
+
+
+            print(builders)
+
+    async def check_for_image_changes(self):
         for image_meta in self.runtime.image_metas():
             # If a rebuild is already requested, skip following checks
             if image_meta in self.changing_image_metas:
@@ -419,6 +467,9 @@ class ConfigScanSources:
             build_record = self.latest_image_build_records_map[image_meta.distgit_key]
             if build_record is None:
                 continue
+
+            # Request a rebuild if one of its parent images has a newer build, or is already marked for rebuild
+            await self.check_builders(image_meta, build_record)
 
             # Request a rebuild if A is a dependent (operator or child image) of B
             # but the latest build of A is older than B.
@@ -676,8 +727,6 @@ class ConfigScanSources:
             click.echo("ISSUES:")
             for item in self.issues:
                 click.echo(f"   {item['name']}: {item['issue']}")
-
-        self.logger.debug(f'KojiWrapper cache size: {int(brew.KojiWrapper.get_cache_size() / 1024)}KB')
 
     def _latest_rhcos_build_id(self, version, arch, private) -> Optional[str]:
         """
