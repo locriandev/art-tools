@@ -95,6 +95,15 @@ class ConfigScanSources:
         await asyncio.gather(*[_find_latest_image_builds(), _find_latest_rpms_builds()])
 
     async def run(self):
+        for meta in self.all_image_metas:
+            builders = list(meta.config['from'].builder) or []
+            builders.append(meta.config['from'])  # Add the parent image to the builders
+
+            for builder in builders:
+                if builder.image:
+                    self.logger.info(meta.distgit_key, builder.image)
+        return
+
         # First, try to rebase into openshift-priv to reduce upstream merge -> downstream build time
         if self.rebase_priv:
             self.rebase_into_priv()
