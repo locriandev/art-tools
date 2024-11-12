@@ -137,10 +137,7 @@ class PromotePipeline:
         for env_var in required_vars:
             if not os.environ.get(env_var):
                 msg = f"Environment variable {env_var} is not set."
-                if not self.runtime.dry_run:
-                    raise ValueError(msg)
-                else:
-                    logger.warning(msg)
+                logger.warning(msg)
 
     async def run(self):
         logger = self.runtime.logger
@@ -167,7 +164,7 @@ class PromotePipeline:
         logger.info("Release name: %s", release_name)
 
         self._slack_client.bind_channel(release_name)
-        await self._slack_client.say_in_thread(f"Promoting release `{release_name}` @release-artists")
+        # await self._slack_client.say_in_thread(f"Promoting release `{release_name}` @release-artists")
 
         justifications = []
         try:
@@ -235,8 +232,8 @@ class PromotePipeline:
                     if isinstance(results[i], Exception):
                         impetus, advisory = tasks_with_args[i]["args"]
                         logger.warn("Error moving advisory %s %s to QE: %s", impetus, advisory, results[i])
-                        await self._slack_client.say_in_thread(
-                            f"Unable to move {impetus} advisory {advisory} to QE. Details in log.")
+                        # await self._slack_client.say_in_thread(
+                        #     f"Unable to move {impetus} advisory {advisory} to QE. Details in log.")
 
             # Ensure the image advisory is in QE (or later) state.
             image_advisory = impetus_advisories.get("image", 0)
@@ -302,9 +299,10 @@ class PromotePipeline:
                     logger.warn("Error verifying attached bugs: %s", err)
 
                     if assembly_type in [AssemblyTypes.PREVIEW, AssemblyTypes.CANDIDATE]:
-                        await self._slack_client.say_in_thread("Attached bugs have some issues. Permitting since "
-                                                               f"assembly is of type {assembly_type}")
-                        await self._slack_client.say_in_thread(str(err))
+                        pass
+                        # await self._slack_client.say_in_thread("Attached bugs have some issues. Permitting since "
+                        #                                        f"assembly is of type {assembly_type}")
+                        # await self._slack_client.say_in_thread(str(err))
                     else:
                         justification = self._reraise_if_not_permitted(err, "ATTACHED_BUGS", permits)
                         justifications.append(justification)
@@ -350,9 +348,9 @@ class PromotePipeline:
 
             if not tag_stable:
                 self._logger.warning("Release %s will not appear on release controllers. Pullspecs: %s", release_name, pullspecs_repr)
-                await self._slack_client.say_in_thread(f"Release {release_name} is ready. It will not appear on the "
-                                                       "release controllers. Please tell the user to manually pull "
-                                                       f"the release images: {pullspecs_repr}")
+                # await self._slack_client.say_in_thread(f"Release {release_name} is ready. It will not appear on the "
+                #                                        "release controllers. Please tell the user to manually pull "
+                #                                        f"the release images: {pullspecs_repr}")
             else:
                 # check if release is already accepted (in case we timeout and run the job again)
                 tasks = []
@@ -367,8 +365,8 @@ class PromotePipeline:
                 if not all(accepted):
                     # Wait for release images to be accepted by the release controllers
                     self._logger.info("Waiting for release images for %s to be accepted by the release controller...", release_name)
-                    await self._slack_client.say_in_thread(f"Release {release_name} has been tagged on release "
-                                                           "controller, but is not accepted yet. Waiting.")
+                    # await self._slack_client.say_in_thread(f"Release {release_name} has been tagged on release "
+                    #                                        "controller, but is not accepted yet. Waiting.")
                     tasks = []
                     for arch, release_info in release_infos.items():
                         release_stream = self._get_release_stream_name(assembly_type, arch)
@@ -387,7 +385,7 @@ class PromotePipeline:
                 self._logger.info("All release images for %s have been accepted by the release controllers.", release_name)
 
                 message = f"Release `{release_name}` has been accepted by the release controllers."
-                await self._slack_client.say_in_thread(message)
+                # await self._slack_client.say_in_thread(message)
 
                 # Send image list
                 if not image_advisory:
@@ -454,7 +452,7 @@ class PromotePipeline:
         except Exception as err:
             self._logger.exception(err)
             message = f"Promoting release {release_name} failed"
-            await self._slack_client.say_in_thread(message)
+            # await self._slack_client.say_in_thread(message)
             raise
 
         # Print release infos to console
@@ -508,7 +506,7 @@ class PromotePipeline:
             self.send_promote_complete_email(data["name"], release_infos)
         except Exception as e:
             self._logger.error("Failed to send promote complete email: %s", str(e))
-            await self._slack_client.say_in_thread("Failed to send promote complete email")
+            # await self._slack_client.say_in_thread("Failed to send promote complete email")
 
         # Backup to ocp-doomsday-registry on AWS
         if "rc" in self.assembly or "ec" in self.assembly or "art" in self.assembly:
@@ -519,7 +517,7 @@ class PromotePipeline:
 
         json.dump(data, sys.stdout)
 
-        await self._slack_client.say_in_thread(f":white_check_mark: promote completed for {release_name}.")
+        # await self._slack_client.say_in_thread(f":white_check_mark: promote completed for {release_name}.")
 
     @staticmethod
     def _get_release_stream_name(assembly_type: AssemblyTypes, arch: str):
