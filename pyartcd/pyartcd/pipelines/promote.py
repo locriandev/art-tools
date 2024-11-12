@@ -809,7 +809,7 @@ class PromotePipeline:
         if errors:
             # this should be impossible given we just created the pullspecs
             raise IOError(f"Not all pullspecs examined were viable: {errors}")
-        if errors := await signatory.sign_pullspecs(need_signing):
+        if errors := await signatory.sign_pullspecs(need_signing, ):  # TODO add release pullspec
             raise IOError(f"Not all signings succeeded, check errors: {errors}")
 
     def publish_baremetal_installer_binary(self, release_pullspec: str, client_mirror_dir: str, build_arch: str):

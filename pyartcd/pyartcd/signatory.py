@@ -372,13 +372,14 @@ class SigstoreSignatory:
             for tag in (await get_release_image_info(pullspec))["references"]["spec"]["tags"]
         )
 
-    async def sign_pullspecs(self, need_signing: Iterable[str]) -> Dict[str, Exception]:
+    async def sign_pullspecs(self, need_signing: Iterable[str], identity: str = None) -> Dict[str, Exception]:
         """
         Sign the given pullspecs via cosign with our KMS.
         :param need_signing: Pullspecs to be signed
+        :param identity: (optional) the container identity
         :return: dict with any signing errors per pullspec
         """
-        args = [(ps, ) for ps in need_signing]
+        args = [(ps, identity) for ps in need_signing]
         results = await run_limited_unordered(self._sign_single_manifest, args, self.concurrency_limit)
         return {pullspec: err for result in results for pullspec, err in result.items()}
 
@@ -406,18 +407,22 @@ class SigstoreSignatory:
                     self._logger.info(f"found sig file at {url}")
                     return True
 
-    async def _sign_single_manifest(self, pullspec: str) -> Dict[str, Exception]:
+    async def _sign_single_manifest(self, pullspec: str, identity: str = None) -> Dict[str, Exception]:
         """
         use sigstore to sign a single image manifest, with one or more signing keys, and upload the signature
         :param pullspec: Pullspec to be signed
+        :param identity: (optional) the container identity; if None, override with pullspec
         :return: dict with any signing errors for pullspec
         """
+
         log = self._logger
+        identity = identity if identity else pullspec
+
         for signing_key_id in self.signing_key_ids:
             cmd = ["cosign", "sign",
                    "--yes",
                    # https://issues.redhat.com/browse/ART-10052
-                   f"--sign-container-identity={pullspec}",
+                   f"--sign-container-identity={identity}",
                    "--key", f"awskms:///{signing_key_id}",
                    ]
 
