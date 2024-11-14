@@ -438,6 +438,8 @@ class PromotePipeline:
                         lock_id=lock_identifier
                     )
 
+                    return  # TODO
+
                 # publish rhcos on mirror via rhcos_sync job
                 # only if release is EC or a GA release (.0)
                 # job will not mirror & overwrite if destination already exists (sync already happened)
