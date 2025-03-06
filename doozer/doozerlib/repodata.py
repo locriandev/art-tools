@@ -339,3 +339,32 @@ class OutdatedRPMFinder:
             if archive_rpm.compare(candidate_rpm) < 0:  # Archive rpm is older than candidate rpm
                 results.append((archive_rpm.nevra, candidate_rpm.nevra, repo))
         return results
+
+
+class RepodataCache:
+    def __init__(self, runtime):
+        self._cache: Dict[str, Dict[str, Repodata]] = {}
+        self._logger = logging.getLogger(__name__)
+        self.group_repos = runtime.repos
+
+    async def get_repodata(self, arch: str, repo_names: List[str]) -> List[Repodata]:
+        results = []
+        caching_repo_names = []
+
+        # Gather repodatas that are already cached
+        for repo_name in repo_names:
+            if repo_name in self._cache.get(arch, {}):
+                results.append(self._cache[arch][repo_name])
+            else:
+                caching_repo_names.append(repo_name)
+
+        # Fetch and cache missing repodatas
+        self._logger.info("Fetching repodatas for enabled repos %s",
+                         ", ".join(f"{repo_name}-{arch}" for repo_name in caching_repo_names))
+        repodatas: List[Repodata] = await asyncio.gather(
+            *(self.group_repos[repo_name].get_repodata(arch) for repo_name in caching_repo_names))
+        for repo_name, repodata in zip(caching_repo_names, repodatas):
+            self._cache.setdefault(arch, {})[repo_name] = repodata
+            results.append(repodata)
+
+        return results

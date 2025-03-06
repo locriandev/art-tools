@@ -17,13 +17,16 @@ import artcommonlib.util
 from artcommonlib import exectools
 from artcommonlib.exectools import cmd_gather_async
 from artcommonlib.konflux.konflux_build_record import KonfluxBuildRecord, Engine, KonfluxBuildOutcome
+from artcommonlib.konflux.package_rpm_finder import PackageRpmFinder
 from artcommonlib.model import Missing, Model
 from artcommonlib.pushd import Dir
 from artcommonlib.rpm_utils import parse_nvr
+from doozerlib.build_info import KonfluxBuildRecordInspector
 from doozerlib.cli import cli, pass_runtime, click_coroutine
 from doozerlib.exceptions import DoozerFatalError
 from doozerlib.image import ImageMetadata
 from doozerlib.metadata import RebuildHint, RebuildHintCode, Metadata
+from doozerlib.repodata import RepodataCache
 from doozerlib.rpmcfg import RPMMetadata
 from doozerlib.runtime import Runtime
 from doozerlib.source_resolver import SourceResolver
@@ -60,6 +63,8 @@ class ConfigScanSources:
         self.assessment_reason = dict()  # maps metadata qualified_key => message describing change
         self.issues = list()  # tracks issues that arose during the scan, which did not interrupt the job
 
+        self.package_rpm_finder = PackageRpmFinder()
+        self.repodata_cache = RepodataCache(runtime)
         self.latest_image_build_records_map: typing.Dict[str, KonfluxBuildRecord] = {}
         self.latest_rpm_build_records_map: typing.Dict[str, typing.Dict[str, KonfluxBuildRecord]] = {}
         self.image_tree = {}
@@ -684,13 +689,10 @@ class ConfigScanSources:
 
     @skip_check_if_changing
     async def scan_rpm_changes(self, image_meta: ImageMetadata):
-        # Determine the list of package installed in the latest image build
-        build_record = self.latest_image_build_records_map[image_meta.distgit_key]
-        installed_packages = {parse_nvr(package)['name']: package for package in build_record.installed_packages}
-
         # Check if the build used any of the ART built rpms that are changing
+        build_record = self.latest_image_build_records_map[image_meta.distgit_key]
         for rpm in self.changing_rpms:
-            if rpm in installed_packages:
+            if rpm in {parse_nvr(package)['name']: package for package in build_record.installed_packages}:
                 self.add_image_meta_change(
                     image_meta,
                     RebuildHint(RebuildHintCode.PACKAGE_CHANGE,
@@ -698,7 +700,19 @@ class ConfigScanSources:
                 )
                 return
 
-        # TODO check non-ART RPMs https://github.com/openshift-eng/art-tools/blob/main/doozer/doozerlib/image.py#L402
+        # Check for changes in non-ART RPMs
+        build_record_inspector = KonfluxBuildRecordInspector(self.runtime, build_record)
+        non_latest_rpms = await build_record_inspector.find_non_latest_rpms(self.package_rpm_finder, self.repodata_cache)
+        rebuild_hints = [
+            f"Outdated RPM {installed_rpm} installed in {build_record.nvr} ({arch}) when {latest_rpm} was available in repo {repo}"
+            for arch, non_latest in non_latest_rpms.items() for installed_rpm, latest_rpm, repo in non_latest
+        ]
+        if rebuild_hints:
+            return self, RebuildHint(
+                RebuildHintCode.PACKAGE_CHANGE,
+                ";\n".join(rebuild_hints)
+            )
+
         # TODO check extra_packages https://github.com/openshift-eng/art-tools/blob/main/doozer/doozerlib/image.py#L327
 
     async def check_changing_rpms(self):
