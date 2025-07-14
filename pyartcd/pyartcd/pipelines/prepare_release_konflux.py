@@ -605,7 +605,7 @@ class PrepareReleaseKonfluxPipeline:
             "image": out.get("payload", []),
             "extras": out.get("non_payload", []),
             "metadata": out.get("olm_builds", []),
-            "olm_builds_not_found": out.get("olm_builds_not_found", []),
+            "olm_builds_not_found": [],  # out.get("olm_builds_not_found", []),
         }
 
         return kind_to_builds
