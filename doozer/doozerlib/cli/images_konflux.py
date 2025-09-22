@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import traceback
+import tracemalloc
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -227,10 +228,19 @@ class KonfluxBuildCli:
             build_priority=self.build_priority,
         )
         builder = KonfluxImageBuilder(config=config, record_logger=runtime.record_logger)
+        memory_tracer = asyncio.create_task(self.trace_memory_allocation())
         tasks = []
         for image_meta in metas:
             tasks.append(asyncio.create_task(builder.build(image_meta)))
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            memory_tracer.cancel()
+            try:
+                await memory_tracer
+            except asyncio.CancelledError:
+                pass  # Expected
+
         failed_images = []
         for index, result in enumerate(results):
             if isinstance(result, Exception):
@@ -241,6 +251,23 @@ class KonfluxBuildCli:
         if failed_images:
             raise DoozerFatalError(f"Failed to build images: {failed_images}")
         LOGGER.info("Build complete")
+
+    async def trace_memory_allocation(self):
+        tracemalloc.start()
+
+        try:
+            while True:
+                current, peak = tracemalloc.get_traced_memory()
+                LOGGER.info(f"Current memory usage: {current / 1024 / 1024:.2f} MB; Peak: {peak / 1024 / 1024:.2f} MB")
+                await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            LOGGER.info("Stopping memory tracer.")
+
+        finally:
+            current, peak = tracemalloc.get_traced_memory()
+            LOGGER.info(f"Final memory usage: Current = {current / 1024 / 1024:.2f} MB | Peak = {peak / 1024 / 1024:.2f} MB")
+            tracemalloc.stop()
 
 
 @cli.command("beta:images:konflux:build", short_help="Build images for the group.")
