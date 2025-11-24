@@ -360,14 +360,23 @@ class ArtNotifyPipeline:
 
         redis_branch = 'count:rebase-failure:konflux'
         self.logger.info(f'Reading from {redis_branch}...')
-        failed_images = await redis.get_keys(f'{redis_branch}:*')
+        all_keys = await redis.get_keys(f'{redis_branch}:*')
+        # Filter out URL keys to get only the counter keys
+        failed_images = [key for key in all_keys if not key.endswith(':url')]
 
         if failed_images:
             fail_counters = await redis.get_multiple_values(failed_images)
-            for image, fail_counter in zip(failed_images, fail_counters):
+            # Also get the corresponding job URLs
+            url_keys = [f'{image}:url' for image in failed_images]
+            job_urls = await redis.get_multiple_values(url_keys)
+
+            for image, fail_counter, job_url in zip(failed_images, fail_counters, job_urls):
                 image_name = image.split(':')[-1]
                 version = image.split(':')[-2]
-                failures.setdefault('konflux', {}).setdefault(version, {})[image_name] = fail_counter
+                failures.setdefault('konflux', {}).setdefault(version, {})[image_name] = {
+                    'count': fail_counter,
+                    'url': job_url,
+                }
 
         return failures
 
@@ -399,10 +408,14 @@ class ArtNotifyPipeline:
                     link_names=True,
                 )
 
-                for image, counter in failures.items():
-                    self.app.client.chat_postMessage(
-                        channel=channel, text=f'- `{image}`: failed {counter} times', thread_ts=response['ts']
-                    )
+                for image, failure_info in failures.items():
+                    counter = failure_info['count']
+                    job_url = failure_info.get('url')
+                    if job_url:
+                        text = f'- `{image}`: failed {counter} times - <{job_url}|View Job>'
+                    else:
+                        text = f'- `{image}`: failed {counter} times'
+                    self.app.client.chat_postMessage(channel=channel, text=text, thread_ts=response['ts'])
 
     async def run(self):
         failed_jobs_text = self._get_failed_jobs_text()
