@@ -70,6 +70,9 @@ class KonfluxRebaseCli:
     async def run(self):
         runtime = self.runtime
         runtime.initialize(mode='images', clone_distgits=False, build_system='konflux')
+        self.runtime.state['images:konflux:rebase'] = {'failed-images': ['ironic']}
+        raise RuntimeError('testing')
+
         assert runtime.source_resolver is not None, "source_resolver is required for this command"
         metas = runtime.ordered_image_metas()
 
