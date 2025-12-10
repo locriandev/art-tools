@@ -857,15 +857,15 @@ async def increment_rebase_fail_counter(image, version, build_system, job_url=No
     Optionally store the job URL where the failure occurred.
     """
 
-    redis_branch = f'count:rebase-failure:{build_system}:{version}'
-    redis_key = f'{redis_branch}:{image}'
-    fail_count = await redis.get_value(redis_key)
+    redis_branch = f'count:rebase-failure:{build_system}:{version}:{image}'
+    failure_key = f'{redis_branch}:failure'
+    fail_count = await redis.get_value(failure_key)
     fail_count = int(fail_count) if fail_count else 0
-    await redis.set_value(key=redis_key, value=fail_count + 1)
+    await redis.set_value(key=failure_key, value=fail_count + 1)
 
     # Store the job URL if provided
     if job_url:
-        await redis.set_value(key=f'{redis_key}:url', value=job_url)
+        await redis.set_value(key=f'{redis_branch}:url', value=job_url)
 
 
 @limit_concurrency(50)
