@@ -361,18 +361,24 @@ class ArtNotifyPipeline:
         redis_branch = 'count:rebase-failure:konflux'
         self.logger.info(f'Reading from {redis_branch}...')
         all_keys = await redis.get_keys(f'{redis_branch}:*')
-        # Filter out URL keys to get only the counter keys
-        failed_images = [key for key in all_keys if not key.endswith(':url')]
+        # Filter out URL and failure suffix keys to get only the base image keys
+        # Keys look like: count:rebase-failure:konflux:4.18:image-name:failure
+        #                 count:rebase-failure:konflux:4.18:image-name:url
+        # We want to get: count:rebase-failure:konflux:4.18:image-name
+        failed_images = [key for key in all_keys if key.endswith(':failure')]
+        # Remove the :failure suffix to get base keys
+        base_keys = [key[:-8] for key in failed_images]  # Remove ':failure' (8 chars)
 
-        if failed_images:
+        if base_keys:
+            # Get the counter values from keys ending with :failure
             fail_counters = await redis.get_multiple_values(failed_images)
             # Also get the corresponding job URLs
-            url_keys = [f'{image}:url' for image in failed_images]
+            url_keys = [f'{base_key}:url' for base_key in base_keys]
             job_urls = await redis.get_multiple_values(url_keys)
 
-            for image, fail_counter, job_url in zip(failed_images, fail_counters, job_urls):
-                image_name = image.split(':')[-1]
-                version = image.split(':')[-2]
+            for base_key, fail_counter, job_url in zip(base_keys, fail_counters, job_urls):
+                image_name = base_key.split(':')[-1]
+                version = base_key.split(':')[-2]
                 failures.setdefault('konflux', {}).setdefault(version, {})[image_name] = {
                     'count': fail_counter,
                     'url': job_url,
