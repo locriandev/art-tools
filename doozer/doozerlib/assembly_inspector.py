@@ -11,6 +11,7 @@ from artcommonlib.assembly import (
     assembly_type,
 )
 from artcommonlib.konflux.package_rpm_finder import PackageRpmFinder
+from artcommonlib.release_util import isolate_el_version_in_release
 from artcommonlib.rhcos import RhcosMissingContainerException, get_container_configs
 from artcommonlib.rpm_utils import compare_nvr, parse_nvr
 from koji import ClientSession
@@ -267,16 +268,26 @@ class AssemblyInspector:
 
         """
         If the rhcos build has RPMs from this group installed, make sure they match the NVRs associated with this assembly.
+        For dual RHCOS builds, we need to check each installed package against the group RPM build for the correct RHEL version.
         """
-        for dgk, assembly_rpm_build in self.get_group_rpm_build_dicts(
-            el_ver=rhcos_build.get_rhel_base_version()
-        ).items():
-            if not assembly_rpm_build:
-                continue
-            package_name = assembly_rpm_build['package_name']
-            assembly_nvr = assembly_rpm_build['nvr']
-            if package_name in installed_packages:
-                installed_nvr = installed_packages[package_name]['nvr']
+        for package_name, installed_build_dict in installed_packages.items():
+            installed_nvr = installed_build_dict['nvr']
+
+            # Determine the RHEL version of the installed package from its release field
+            parsed_nvr = parse_nvr(installed_nvr)
+            installed_el_ver = isolate_el_version_in_release(parsed_nvr['release'])
+
+            # Get group RPM builds for the installed package's RHEL version
+            group_rpm_builds = self.get_group_rpm_build_dicts(el_ver=installed_el_ver)
+
+            # Check if this package is one of our group RPMs
+            for dgk, assembly_rpm_build in group_rpm_builds.items():
+                if not assembly_rpm_build:
+                    continue
+                if assembly_rpm_build['package_name'] != package_name:
+                    continue
+
+                assembly_nvr = assembly_rpm_build['nvr']
                 if assembly_nvr != installed_nvr:
                     # We could consider permitting this in AssemblyTypes.CUSTOM, but it means that the RHCOS build
                     # could not be effectively reproduced by the rebuild job.
