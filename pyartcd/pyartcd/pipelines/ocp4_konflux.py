@@ -374,22 +374,19 @@ class KonfluxOcp4Pipeline:
         # break CI builds for most upstream components if we don't catch it before we push. So we use apiserver as
         # bellwether to make sure that the current builder image is good enough. We can still break CI (e.g. pushing a
         # bad ruby-25 image along with this push, but it will not be a catastrophic event like breaking the apiserver.
-        record_log = self.parse_record_log()
-        if not record_log:
-            LOGGER.warning('record.log not found, skipping CI mirroring check')
-            return
-
-        built_images = {
-            entry['name']: entry for entry in record_log.get('image_build_konflux', []) if not int(entry['status'])
-        }
-        if built_images.get('ose-openshift-apiserver', None):
+        # record_log = self.parse_record_log()
+        # if not record_log:
+        #     LOGGER.warning('record.log not found, skipping CI mirroring check')
+        #     return
+        #
+        # built_images = {
+        #     entry['name']: entry for entry in record_log.get('image_build_konflux', []) if not int(entry['status'])
+        # }
+        # if built_images.get('ose-openshift-apiserver', None):
             LOGGER.warning('apiserver rebuilt: mirroring streams to CI...')
 
             # Make sure our api.ci token is fresh
             await oc.registry_login()
-
-            # Log into QCI registry
-            await oc.qci_registry_login()
 
             # Mirror out ART equivalent images to CI
             cmd = self._doozer_base_command.copy()
@@ -702,6 +699,8 @@ class KonfluxOcp4Pipeline:
 
     async def run(self):
         await self.initialize()
+        await self.mirror_streams_to_ci()
+        return
 
         # Rebase and build RPMs
         await self.rebase_and_build_rpms(self.release)

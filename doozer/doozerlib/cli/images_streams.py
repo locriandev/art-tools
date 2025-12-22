@@ -413,7 +413,6 @@ def _get_upstreaming_entries(runtime, stream_names=None):
     if not stream_names:
         # If not specified, use all.
         stream_names = runtime.get_stream_names()
-        fetch_image_metas = True
 
     upstreaming_entries = {}
     streams_config = runtime.streams
