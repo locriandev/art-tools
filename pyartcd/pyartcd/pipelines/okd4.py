@@ -11,7 +11,8 @@ import click
 import yaml
 from artcommonlib import exectools
 from artcommonlib.variants import BuildVariant
-from doozerlib.cli.images_okd import OKD_DEFAULT_IMAGE_REPO
+from doozerlib.cli.images_okd import OKD_DEFAULT_IMAGE_REPO, get_needed_for_okd_payload_constructions
+from doozerlib.runtime import Runtime as DoozerRuntime
 from doozerlib.state import STATE_PASS
 
 from pyartcd import jenkins, locks
@@ -421,29 +422,23 @@ class KonfluxOkd4Pipeline:
             LOGGER.info('[DRY RUN] Would tag %d images', len(self.built_images))
             return
 
-        # Load image metadata from ocp-build-data to get payload tag names
-        LOGGER.info('Loading image metadata to resolve payload tag names')
-        ocp_build_data_path = Path(self.runtime.doozer_working) / 'ocp-build-data' / 'images'
-        payload_tag_map = {}
+        # Initialize doozer runtime to get ImageMetadata objects for proper filtering
+        LOGGER.info('Initializing doozer runtime to filter payload images')
 
-        for image in self.built_images:
-            image_name = image['name']
-            yaml_file = ocp_build_data_path / f'{image_name}.yml'
+        # Build the group parameter with optional gitref
+        group_param = f'openshift-{self.version}'
+        if self.data_gitref:
+            group_param += f'@{self.data_gitref}'
 
-            if yaml_file.exists():
-                try:
-                    with open(yaml_file) as f:
-                        image_metadata = yaml.safe_load(f)
-                    payload_tag = self._get_payload_tag_name(image_name, image_metadata)
-                    payload_tag_map[image_name] = payload_tag
-                    if payload_tag != image_name:
-                        LOGGER.info('Mapped %s -> %s (from payload_name config)', image_name, payload_tag)
-                except Exception as e:
-                    LOGGER.warning('Failed to load metadata for %s: %s. Using image name as tag.', image_name, e)
-                    payload_tag_map[image_name] = image_name
-            else:
-                LOGGER.warning('Metadata file not found for %s. Using image name as tag.', image_name)
-                payload_tag_map[image_name] = image_name
+        doozer_runtime = DoozerRuntime(
+            assembly=self.assembly,
+            working_dir=str(self.runtime.doozer_working),
+            data_path=self.data_path,
+            group=group_param,
+            arches=OKD_ARCHES,
+            build_system='konflux',
+        )
+        doozer_runtime.initialize(mode='images', clone_distgits=False, clone_source=False, disabled=True)
 
         is_name = f'scos-{self.version}-art'
         env = os.environ.copy()
@@ -457,13 +452,33 @@ class KonfluxOkd4Pipeline:
             image_pullspec = image.get('image_pullspec')
             image_tag = image.get('image_tag')
 
+            # Get the ImageMetadata object for this image
+            if image_name not in doozer_runtime.image_map:
+                LOGGER.warning('Image %s not found in doozer runtime; skipping', image_name)
+                continue
+
+            image_meta = doozer_runtime.image_map[image_name]
+
+            # Only tag images that are needed for OKD payload construction
+            if not get_needed_for_okd_payload_constructions(image_meta):
+                LOGGER.info('Skipping %s: not needed for OKD payload construction', image_name)
+                continue
+
             if not image_pullspec or not image_tag:
                 LOGGER.warning('Image %s missing pullspec or tag; skipping', image_name)
                 failed_tags.append(image_name)
                 continue
 
             # Get the payload tag name from metadata (honors payload_name config)
-            payload_tag = payload_tag_map.get(image_name, image_name)
+            try:
+                image_metadata = image_meta.config.primitive()
+                payload_tag = self._get_payload_tag_name(image_name, image_metadata)
+                if payload_tag != image_name:
+                    LOGGER.info('Mapped %s -> %s (from payload_name config)', image_name, payload_tag)
+
+            except Exception as e:
+                LOGGER.warning('Failed to get payload tag for %s: %s. Using image name as tag.', image_name, e)
+                payload_tag = image_name
 
             # Tag into imagestream
             target = f'{self.imagestream_namespace}/{is_name}:{payload_tag}'
@@ -471,6 +486,7 @@ class KonfluxOkd4Pipeline:
                 await self._tag_image_to_stream(source_pullspec=image_pullspec, target_tag=target, env=env)
                 LOGGER.info('Tagged %s into %s', image_name, target)
                 successful_tags.append(image_name)
+
             except Exception as e:
                 LOGGER.warning('Failed to tag %s into imagestream: %s', image_name, e)
                 failed_tags.append(image_name)
