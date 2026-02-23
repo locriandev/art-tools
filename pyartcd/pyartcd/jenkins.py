@@ -2,6 +2,7 @@ import functools
 import logging
 import os
 import time
+import uuid
 from enum import Enum
 from typing import Optional
 from urllib.parse import unquote, urlparse
@@ -98,6 +99,19 @@ def get_build_path():
 
     url = get_build_url()
     return '/'.join(url.split('/')[3:]) if url else None
+
+
+def get_build_path_or_random():
+    """
+    Returns the build path if BUILD_URL env var is set, otherwise generates a random UUID.
+    This is useful for lock identifiers when running outside of Jenkins.
+    """
+
+    build_path = get_build_path()
+    if not build_path:
+        logger.warning('Env var BUILD_URL has not been defined: using a random identifier for the locks')
+        return f'random-{uuid.uuid4()}'
+    return build_path
 
 
 def get_build_id() -> str:

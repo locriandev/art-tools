@@ -523,11 +523,7 @@ class PromotePipeline:
                 if not self.skip_signing:
                     if not self.runtime.dry_run:
                         lock = Lock.SIGNING
-                        lock_identifier = jenkins.get_build_path()
-                        if not lock_identifier:
-                            self._logger.warning(
-                                'Env var BUILD_URL has not been defined: a random identifier will be used for the locks'
-                            )
+                        lock_identifier = jenkins.get_build_path_or_random()
 
                         await locks.run_with_lock(
                             coro=self.sign_artifacts(release_name, client_type, release_infos, message_digests),
