@@ -133,9 +133,7 @@ async def olm_bundle_konflux(
 
     lock = Lock.OLM_BUNDLE_KONFLUX
     lock_name = lock.value.format(version=version)
-    lock_identifier = jenkins.get_build_path()
-    if not lock_identifier:
-        runtime.logger.warning('Env var BUILD_URL has not been defined: a random identifier will be used for the locks')
+    lock_identifier = jenkins.get_build_path_or_random()
 
     try:
         # Build bundles
