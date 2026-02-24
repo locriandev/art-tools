@@ -501,6 +501,10 @@ class KonfluxOkdPipeline:
             self.logger.info('Assembly is not "stream"; skipping CoreOS imagestream mirroring')
             return
 
+        if not self.built_images:
+            self.logger.warning('No images were successfully built; skipping CoreOS imagestream mirroring')
+            return
+
         # Skip mirroring for 4.21 and 4.22 as it's handled by openshift/release PR #74529
         if self.version in ['4.21', '4.22']:
             self.logger.info('Version %s: CoreOS mirroring is handled by openshift/release; skipping', self.version)
