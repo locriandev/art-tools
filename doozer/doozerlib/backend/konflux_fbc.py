@@ -676,6 +676,8 @@ class KonfluxFbcRebaser:
         nvrs = {bundle_build.operator_nvr}
         if bundle_build.operand_nvrs:
             nvrs |= set(bundle_build.operand_nvrs)
+        # Filter out "external" image NVRs - these are external images we consume but do not necessarly build (i.e postgresql, etc)
+        nvrs = {nvr for nvr in nvrs if nvr != "external"}
         assert konflux_db.record_cls is KonfluxBuildRecord, "konflux_db is not bound to KonfluxBuildRecord. Doozer bug?"
         ref_builds = await konflux_db.get_build_records_by_nvrs(list(nvrs), exclude_large_columns=True)
         return ref_builds
