@@ -775,12 +775,6 @@ class GenPayloadCli:
             # Only nightlies have the concept of private and public payloads
             self.privacy_modes = [False, True]
 
-        if rt.assembly_type is not AssemblyTypes.STREAM and self.emergency_ignore_issues:
-            raise DoozerFatalError(
-                "Assemblies of type other than 'stream' need to have their permits listed "
-                "in the assembly definitions. `EMERGENCY_IGNORE_ISSUES` is not a valid option"
-            )
-
         # check that we can produce a full multi nightly if requested
         if self.apply_multi_arch and (rt.images or rt.exclude or self.exclude_arch) and not self.multi_model:
             raise DoozerFatalError(
