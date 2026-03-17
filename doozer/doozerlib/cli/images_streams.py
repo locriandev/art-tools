@@ -1503,6 +1503,37 @@ Fork build_root (in .ci-operator.yaml): {fork_ci_build_root_coordinate}
 
                 exectools.cmd_assert(f'git add -f {str(ci_operator_config_path)}')
 
+                # Extract Go version from build_root_image tag and update go.mod if needed
+                # Example tags: "golang-1.25", "rhel-8-golang-1.25", etc.
+                tag = desired_ci_build_root_coordinate.get('tag', '')
+                go_version_match = re.search(r'golang[:-](\d+\.\d+)', tag)
+                if go_version_match:
+                    desired_go_version = go_version_match.group(1)
+                    go_mod_path = Dir.getpath().joinpath('go.mod').resolve()
+
+                    if go_mod_path.exists():
+                        go_mod_content = go_mod_path.read_text(encoding='utf-8')
+
+                        # Update the go directive (matches patterns like "go 1.24" or "go 1.24.0")
+                        updated_go_mod, num_subs = re.subn(
+                            r'^go\s+\d+\.\d+(\.\d+)?$',
+                            f'go {desired_go_version}',
+                            go_mod_content,
+                            count=1,
+                            flags=re.MULTILINE,
+                        )
+
+                        if num_subs > 0 and updated_go_mod != go_mod_content:
+                            go_mod_path.write_text(updated_go_mod, encoding='utf-8')
+                            exectools.cmd_assert(f'git add {str(go_mod_path)}')
+                            logger.info(f'Updated go.mod to Go version {desired_go_version}')
+                        elif num_subs > 0:
+                            logger.info(f'go.mod already at Go version {desired_go_version}')
+                        else:
+                            logger.warning(f'Could not find go directive in go.mod to update to {desired_go_version}')
+                    else:
+                        logger.info('No go.mod file found in repository (this is normal for non-Go repos)')
+
             desired_df_digest = compute_dockerfile_digest(df_path)
 
             # Check for any existing open PR
@@ -1609,6 +1640,9 @@ In order for your upstream .ci-operator.yaml configuration to be honored, you mu
 build_root:
   from_repository: true
 ```
+
+**Note**: This PR may also update `go.mod` to align the Go version with `.ci-operator.yaml` and `Dockerfile`
+to ensure the `verify-golang-versions` check passes.
 """
 
             pr_body += """
