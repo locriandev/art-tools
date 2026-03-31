@@ -644,6 +644,14 @@ class KonfluxImageBuilder:
             # we request konflux to generate sbom in spdx schema: https://spdx.dev/
             # https://github.com/openshift-eng/art-tools/blob/fb172e73df248b1dbc09c3666b5229b4db705427/doozer/doozerlib/backend/konflux_client.py#L473
             for x in sbom_contents["packages"]:
+                # Only process packages actually installed in the image (from RPM DB).
+                # Skip packages that are only available in repository metadata.
+                # This prevents spurious entries like kernel-rt-427.116.1 appearing
+                # when only kernel-rt-427.117.1 is actually installed.
+                source_info = x.get("sourceInfo", "")
+                if "RPM DB" not in source_info and "rpmdb.sqlite" not in source_info:
+                    continue
+
                 purl_string = next(
                     (ref["referenceLocator"] for ref in x["externalRefs"] if ref["referenceType"] == "purl"), ""
                 )
