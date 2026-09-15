@@ -28,6 +28,59 @@ class TestOcp4ScanKonfluxPipeline(unittest.IsolatedAsyncioTestCase):
             skip_rpms=False,
         )
 
+    def test_custom_assembly_is_allowed_for_non_dry_run(self):
+        self.runtime.dry_run = False
+        pipeline = Ocp4ScanPipeline(
+            runtime=self.runtime,
+            version='5.0',
+            data_path='https://github.com/openshift-eng/ocp-build-data',
+            assembly='art23398',
+            data_gitref='',
+            image_list='',
+            skip_rpms=True,
+        )
+
+        pipeline.check_params()
+
+    def test_custom_data_path_is_rejected_for_non_dry_run(self):
+        self.runtime.dry_run = False
+        pipeline = Ocp4ScanPipeline(
+            runtime=self.runtime,
+            version='5.0',
+            data_path='https://github.com/example/ocp-build-data',
+            assembly='art23398',
+            data_gitref='',
+            image_list='',
+            skip_rpms=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, 'Custom data paths can only be used in dry-run mode'):
+            pipeline.check_params()
+
+    @patch('pyartcd.pipelines.ocp4_scan_konflux.jenkins')
+    def test_source_changes_trigger_build_for_scanned_assembly(self, mock_jenkins):
+        self.runtime.dry_run = False
+        pipeline = Ocp4ScanPipeline(
+            runtime=self.runtime,
+            version='5.0',
+            data_path='https://github.com/openshift-eng/ocp-build-data',
+            assembly='art23398',
+            data_gitref='',
+            image_list='',
+            skip_rpms=True,
+        )
+        pipeline.changes = {'images': ['test-image']}
+        pipeline.report = {'images': [{'name': 'test-image', 'changed': True}]}
+
+        pipeline.handle_source_changes()
+
+        mock_jenkins.start_ocp4_konflux.assert_called_once_with(
+            build_version='5.0',
+            assembly='art23398',
+            image_list=['test-image'],
+            rpm_list=[],
+        )
+
     @patch.dict(os.environ, {'KUBECONFIG': '/path/to/kubeconfig'})
     @patch('pyartcd.pipelines.ocp4_scan_konflux.exectools.cmd_gather_async')
     async def test_get_changes_captures_issues_and_command_failure(self, mock_cmd_gather):

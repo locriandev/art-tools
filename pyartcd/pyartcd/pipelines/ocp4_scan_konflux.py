@@ -78,12 +78,10 @@ class Ocp4ScanPipeline:
 
     def check_params(self):
         """
-        Make sure non-stream assemblies, custom forks and branches are only used with dry run mode
+        Make sure custom forks and branches are only used with dry run mode.
         """
 
         if not self.runtime.dry_run:
-            if self.assembly != 'stream':
-                raise ValueError('non-stream assemblies are only allowed in dry-dun mode')
             if self.data_path != constants.OCP_BUILD_DATA_URL or self.data_gitref:
                 raise ValueError('Custom data paths can only be used in dry-run mode')
 
@@ -230,7 +228,7 @@ class Ocp4ScanPipeline:
         self.logger.info('Triggering a %s ocp4-konflux build with %d images', self.version, len(changed_ocp_images))
         jenkins.start_ocp4_konflux(
             build_version=self.version,
-            assembly='stream',
+            assembly=self.assembly,
             image_list=changed_ocp_images,
             rpm_list=changed_rpm,
         )
@@ -268,7 +266,7 @@ class Ocp4ScanPipeline:
             self.logger.info('Triggering a %s build-sync to pick up latest RHCOS', self.version)
             jenkins.start_build_sync(
                 build_version=self.version,
-                assembly="stream",
+                assembly=self.assembly,
                 build_system="konflux",
             )
 
