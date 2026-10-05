@@ -2085,11 +2085,13 @@ class GenPayloadCli:
             for payload_entry in entries
             for issue in payload_entry.issues or []
         )
+        rhcos_build = next((entry.rhcos_build for entry in entries if entry.rhcos_build is not None), None)
         return self.payload_generator.build_payload_istag(
             tag_name,
             PayloadEntry(
                 dest_pullspec=output_digest_pullspec,
                 issues=issues,
+                rhcos_build=rhcos_build,
             ),
         )
 
@@ -2378,6 +2380,14 @@ class PayloadGenerator:
     def __init__(self, runtime: Runtime = None, package_rpm_finder=None):
         self.runtime = runtime
         self.package_rpm_finder = package_rpm_finder
+
+    @property
+    def rhcos_payload_tag_names(self) -> Set[str]:
+        if self.runtime is None:
+            return set()
+
+        rhcos_config = self.runtime.group_config.get("rhcos", {})
+        return {payload_tag.name for payload_tag in rhcos_config.get("payload_tags", [])}
 
     @staticmethod
     def find_mismatched_siblings(
@@ -2848,15 +2858,14 @@ class PayloadGenerator:
 
         return members, issues
 
-    @staticmethod
-    def build_payload_istag(payload_tag_name: str, payload_entry: PayloadEntry) -> Dict:
+    def build_payload_istag(self, payload_tag_name: str, payload_entry: PayloadEntry) -> Dict:
         """
         :param payload_tag_name: The name of the payload tag for which to create an istag.
         :param payload_entry: The payload entry to serialize into an imagestreamtag.
         :return: Returns an imagestreamtag dict for a release payload imagestream.
         """
 
-        return {
+        istag = {
             "annotations": PayloadGenerator.build_inconsistency_annotations(payload_entry.issues),
             "name": payload_tag_name,
             "from": {
@@ -2867,6 +2876,13 @@ class PayloadGenerator:
                 "importMode": "PreserveOriginal",
             },
         }
+
+        # ART/Konflux-built CoreOS images are external references. RHCOS pipeline
+        # images must retain the default import behavior.
+        if payload_tag_name in self.rhcos_payload_tag_names and payload_entry.rhcos_build is None:
+            istag["reference"] = True
+
+        return istag
 
     def build_payload_imagestream(
         self,

@@ -31,6 +31,29 @@ rgp_cli.asyncio.sleep = no_sleep
 
 
 class TestGenPayloadCli(IsolatedAsyncioTestCase):
+    def test_build_payload_istag_references_art_coreos_images_only(self):
+        runtime = MagicMock()
+        runtime.group_config = Model(dict(rhcos=Model(dict(payload_tags=[Model(dict(name="rhel-coreos"))]))))
+        payload_generator = rgp_cli.PayloadGenerator(runtime)
+        art_coreos_entry = rgp_cli.PayloadEntry(
+            issues=[],
+            dest_pullspec="quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:art-coreos",
+            build_record_inspector=MagicMock(),
+        )
+        rhcos_entry = rgp_cli.PayloadEntry(
+            issues=[],
+            dest_pullspec="quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:rhcos",
+            rhcos_build=MagicMock(),
+        )
+
+        art_coreos_istag = payload_generator.build_payload_istag("rhel-coreos", art_coreos_entry)
+        rhcos_istag = payload_generator.build_payload_istag("rhel-coreos", rhcos_entry)
+        regular_istag = payload_generator.build_payload_istag("rhel-coreos-extensions", art_coreos_entry)
+
+        self.assertTrue(art_coreos_istag["reference"])
+        self.assertNotIn("reference", rhcos_istag)
+        self.assertNotIn("reference", regular_istag)
+
     def test_find_rhcos_payload_entries(self):
         rhcos_build = MagicMock()
         assembly_inspector = MagicMock()
